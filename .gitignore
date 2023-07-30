@@ -1,3 +1,5 @@
 __pycache__/
 .idea/
 config.py
+.artists_cache.pkl
+.spotipy_auth.cache
