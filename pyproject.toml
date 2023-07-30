@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "spotify_script"
+version = "0.1.0"
+description = "Script to manage, augment, and filter spotify playlists"
+authors = ["Nick Merlino <nick@merlino.net>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pandas = "^1.3.4"
+numpy = "^1.21.3"
+matplotlib = "^3.4.3"
+spotipy = "^2.25.0"
+tqdm = "^4.62.3"
+retrying = "^1.3.3"
+
+[tool.poetry.dev-dependencies]
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
