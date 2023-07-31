@@ -160,3 +160,20 @@ def upload_playlist(playlist_id, playlist_name, new_track_id_list):
         logging.error(f"Can't update playlists - {e}")
         sp.user_playlist_unfollow(SPOTIFY_USER_ID, backup_playlist_id)
         exit()
+
+def create_predicted_playlist(predicted_playlist_name, track_id_list, popular_on_spotify_id):
+    try:
+        predicted_playlist = sp.user_playlist_create(SPOTIFY_USER_ID, f"{predicted_playlist_name} (Predicted)", public=False, description="Predicted Playlist")
+        predicted_playlist_id = predicted_playlist["id"]
+
+        # Add the tracks to the new playlist in batches of 100 (Spotify API limit)
+        for i in range(0, len(track_id_list), 100):
+            sp.playlist_add_items(predicted_playlist_id, track_id_list[i:i+100])
+
+        # Remove the existing tracks from the playlist
+        for chunk in divide_chunks_list(track_id_list, 100):
+            sp.playlist_remove_all_occurrences_of_items(popular_on_spotify_id, chunk)
+
+    except SpotifyException as e:
+        logging.error(f"Can't created predicted playlists - {e}")
+        exit()

@@ -6,6 +6,9 @@ from pickle import dump, load
 import numpy as np
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 from config import *
 from spotipy_api import *
 
@@ -14,6 +17,8 @@ ARTISTS_CACHE = ".artists_cache.pkl"
 
 playlist_name_to_id = dict()
 artist_id_to_name = dict()
+
+audio_features = ["duration_ms", "popularity", "danceability", "valence", "energy", "tempo", "loudness", "speechiness", "instrumentalness", "liveness", "acousticness", "key", "mode", "time_signature", "release_year", "explicit"]
 
 # Configure logging
 logging.basicConfig(level=logging.CRITICAL, format="%(levelname)s - %(message)s")
@@ -185,7 +190,7 @@ def update_artist_cache():
     new_artist_ids = set(artist_ids) - set(artist_id_to_name.keys())
     if new_artist_ids:
         num_new_artists = len(new_artist_ids)
-        logging.info(f"{num_new_artists} new artists")
+        logging.info(f"New artists: {num_new_artists}")
         artist_id_to_name.update(get_artists(new_artist_ids))
 
     dump(artist_id_to_name, open(ARTISTS_CACHE, "wb"))
@@ -203,7 +208,7 @@ def get_popular_track_verions():
     for track_id, track in user_tracks_df.iterrows():
         progress_bar.update(1)
         original_artists_ids = track["artists"].split(',')
-        original_artists = [artist_id_to_name[artist_id] for artist_id in original_artists_ids]
+        original_artists = [artist_id_to_name[artist_id] for artist_id in original_artists_ids if artist_id in artist_id_to_name]
 
         highest_popularity_track = get_highest_popularity_track(track["track_name"], original_artists)
             
@@ -258,7 +263,7 @@ def upload_playlists():
         upload_playlist(playlist_id, group_df["playlist_name"].unique()[0], sorted_df.index.to_list())
 
 def plot_playlists():
-    audio_features = ["duration_ms", "popularity", "danceability", "valence", "energy", "tempo", "loudness", "speechiness", "instrumentalness", "liveness", "acousticness", "key", "mode", "time_signature", "release_year", "explicit"]
+    global audio_features
 
     user_tracks_df = spotify_database[spotify_database["last_deleted_date"].isnull()]
 
@@ -293,30 +298,83 @@ def plot_playlists():
 
 # Untested
 def restore_deleted_songs():
-    for track_id, track_df in spotify_database[(spotify_database["last_deleted_date"].notnull()) & (spotify_database["script_deleted"].notnull())].iterrows():
+    for track_id, track_df in spotify_database[spotify_database["last_deleted_date"].notnull()].iterrows():
         curr_time = datetime.now()
         time = datetime.strptime(track_df["last_deleted_date"], "%m/%d/%Y %H:%M:%S")
         if (curr_time - time) <= timedelta(hours=24):
             spotify_database.at[track_id, "script_deleted"] = np.NaN
+            spotify_database.at[track_id, "user_deleted"] = np.NaN
             spotify_database.at[track_id, "last_deleted_date"] = np.NaN
+
+def move_tracks():
+    for index, df in spotify_database.iterrows():        
+        if df['playlist_name'] in ["Slow it Down", "Spotify and Chill", "Just Good Music"]:
+            if df['energy'] > 0.7:
+                spotify_database.at[index, 'playlist_name'] = "Just Good Music"
+                spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Just Good Music"]
+            elif df['energy'] > 0.4:
+                spotify_database.at[index, 'playlist_name'] = "Spotify and Chill"
+                spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Spotify and Chill"]
+            else:
+                spotify_database.at[index, 'playlist_name'] = "Slow it Down"
+                spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Slow it Down"]
+
+        if df['playlist_name'] in ["Poolside", "Dance the Night Away"]:
+            if df['energy'] > 0.8:
+                spotify_database.at[index, 'playlist_name'] = "Dance the Night Away"
+                spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Dance the Night Away"]
+            else:
+                spotify_database.at[index, 'playlist_name'] = "Poolside"
+                spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Poolside"]
+    
+def generate_playlist_predictions():
+    global audio_features
+    df = spotify_database[spotify_database["last_deleted_date"].isnull()].dropna(subset=audio_features)
+
+    # Encode the playlist_name to numeric labels
+    label_encoder = LabelEncoder()
+    df["label"] = label_encoder.fit_transform(df["playlist_name"])
+    
+    # Split the data into training and testing sets
+    train_df = df[df["playlist_name"] != "Popular on Spotify"]
+    test_df = df[df["playlist_name"] == "Popular on Spotify"]
+
+    X_train = train_df[audio_features]
+    y_train = train_df["label"]
+    X_test = test_df[audio_features]
+    
+    # Train the RandomForestClassifier
+    classifier = RandomForestClassifier()
+    classifier.fit(X_train, y_train)
+
+    # Predict the best-fit playlist for the entries with "playlist_name == 'Popular on Spotify'"
+    predicted_labels = classifier.predict(X_test)
+    predicted_playlists = label_encoder.inverse_transform(predicted_labels)
+
+    # Add the predicted playlist names to the test DataFrame
+    test_df["predicted_playlist"] = predicted_playlists
+    
+    for _, group_df in tqdm(test_df.groupby("predicted_playlist"), desc="Uploading predicted playlists"):
+        predicted_playlist_name = group_df["predicted_playlist"].unique()[0]
+        create_predicted_playlist(predicted_playlist_name, group_df.index, playlist_name_to_id["Popular on Spotify"])
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("-n", action="store_true", help="Find new music")
-    group.add_argument("-d", action="store_true", help="Delete duds")
-    
-    group2 = group.add_mutually_exclusive_group()
+    group1 = parser.add_argument_group()
+    group1.add_argument("-n", action="store_true", help="Find new music")
+    group1.add_argument("-d", action="store_true", help="Delete duds")
+
+    group2 = parser.add_mutually_exclusive_group()
     group2.add_argument("-r", action="store_true", help="Restore deleted songs from today")
+    group2.add_argument("-c", action="store_true", help="Print current spotify categories")
+    group2.add_argument("-p", action="store_true", help="Plot attributes")
+    group2.add_argument("-m", action="store_true", help="Predict playlists")
     
-    group3 = group.add_mutually_exclusive_group()
-    group3.add_argument("-c", action="store_true", help="Print current spotify categories")
-
-    group4 = group.add_mutually_exclusive_group()
-    group.add_argument("-p", action="store_true", help="Plot attributes")
-
     args = parser.parse_args()
+
+    if (args.n or args.d) and (args.r or args.c or args.p or args.m):
+        logging.error("Invalid combination")
+        exit()
 
     if args.c:
         logging.info("Getting current categories")
@@ -335,13 +393,18 @@ if __name__ == "__main__":
     update_playlist_info(playlists)
     spotify_database.to_csv("spotify-database.csv")
     
+    if args.m:
+        generate_playlist_predictions()
+        exit()
+
     if args.r:
         print("Restoring deleted tracks from today")
         restore_deleted_songs()
+        spotify_database.to_csv("spotify-database.csv")
+        upload_playlists()
         exit()
 
     if args.n:
-        logging.info("Finding New Music")
         find_new_music()
         spotify_database.to_csv("spotify-database.csv")
 
@@ -349,285 +412,11 @@ if __name__ == "__main__":
 
     if args.d:
         get_popular_track_verions()
+        spotify_database.to_csv("spotify-database.csv")
         delete_duds()
 
     update_track_audio_features()
+    move_tracks()
     spotify_database.to_csv("spotify-database.csv")
-    
-    # logging.info("Moving Songs")
-    # moveTracks()
 
     upload_playlists()
-
-
-    # print("Create Playlist Clusters")
-    # clusterPlaylists()
-
-
-
-
-
-
-
-
-
-
-
-# DANCEABILITY_QUALIFIER = 0.65
-# DANCE_ENERGY_QUALIFIER = 0.8
-
-# HIGH_ENERGY_QUALIFIER = 0.8
-# LOW_ENERGY_QUALIFIER = 0.5
-# NEW_MUSIC_QUALIFIER = 85
-
-
-
-
-# def process_energy(just_good_music, spotify_and_chill, slow_it_down):
-#     move_to_just_good_music_track_id_set = set()
-#     move_to_spotify_and_chill_track_id_set = set()
-#     move_to_slow_it_down_track_id_set = set()
-
-#     for track_id in playlist_id_to_attributes[just_good_music]["track_id_set"]:
-#         track_energy = track_id_to_attributes[track_id]["features"]["energy"]
-#         if track_energy < HIGH_ENERGY_QUALIFIER and track_energy >= LOW_ENERGY_QUALIFIER:
-#             move_to_spotify_and_chill_track_id_set.add(track_id)
-#             print("Moved: " + track_id_to_attributes[track_id]["name"] +
-#                   " from just good music to Spotify and Chill for its energy of " + str(track_energy))
-#         elif track_energy < LOW_ENERGY_QUALIFIER:
-#             move_to_slow_it_down_track_id_set.add(track_id)
-#             print("Moved: " + track_id_to_attributes[track_id]["name"] +
-#                   " from just good music to Slow it Down for its energy of " + str(track_energy))
-
-#     for track_id in playlist_id_to_attributes[spotify_and_chill]["track_id_set"]:
-#         track_energy = track_id_to_attributes[track_id]["features"]["energy"]
-#         if track_energy >= HIGH_ENERGY_QUALIFIER:
-#             move_to_just_good_music_track_id_set.add(track_id)
-#             print("Moved: " + track_id_to_attributes[track_id]["name"] +
-#                   " from Spotify and Chill to Just Good Music for its energy of " + str(track_energy))
-#         elif track_energy < LOW_ENERGY_QUALIFIER:
-#             move_to_slow_it_down_track_id_set.add(track_id)
-#             print("Moved: " + track_id_to_attributes[track_id]["name"] +
-#                   " from Spotify and Chill to Slow it Down for its energy of " + str(track_energy))
-
-#     for track_id in playlist_id_to_attributes[slow_it_down]["track_id_set"]:
-#         track_energy = track_id_to_attributes[track_id]["features"]["energy"]
-#         if track_energy >= HIGH_ENERGY_QUALIFIER:
-#             move_to_just_good_music_track_id_set.add(track_id)
-#             print("Moved: " + track_id_to_attributes[track_id]["name"] +
-#                   " from Slow it Down to Just Good Music for its energy of " + str(track_energy))
-#         elif track_energy >= LOW_ENERGY_QUALIFIER and track_energy < HIGH_ENERGY_QUALIFIER:
-#             move_to_spotify_and_chill_track_id_set.add(track_id)
-#             print("Moved: " + track_id_to_attributes[track_id]["name"] +
-#                   " from Slow it Down to Spotify and Chill for its energy of " + str(track_energy))
-
-#     if move_to_just_good_music_track_id_set:
-#         for chunk in divide_chunks_list(list(move_to_just_good_music_track_id_set), 100):
-#             spotify.playlist_add_items(just_good_music, chunk)
-#             spotify.playlist_remove_all_occurrences_of_items(
-#                 spotify_and_chill, chunk)
-#             spotify.playlist_remove_all_occurrences_of_items(
-#                 slow_it_down, chunk)
-
-#         playlist_id_to_attributes[just_good_music]["track_id_set"].update(
-#             move_to_just_good_music_track_id_set)
-#         playlist_id_to_attributes[spotify_and_chill]["track_id_set"] = playlist_id_to_attributes[spotify_and_chill]["track_id_set"].difference(
-#             move_to_just_good_music_track_id_set)
-#         playlist_id_to_attributes[slow_it_down]["track_id_set"] = playlist_id_to_attributes[slow_it_down]["track_id_set"].difference(
-#             move_to_just_good_music_track_id_set)
-
-#     if move_to_spotify_and_chill_track_id_set:
-#         for chunk in divide_chunks_list(list(move_to_spotify_and_chill_track_id_set), 100):
-#             spotify.playlist_add_items(spotify_and_chill, chunk)
-#             spotify.playlist_remove_all_occurrences_of_items(
-#                 just_good_music, chunk)
-#             spotify.playlist_remove_all_occurrences_of_items(
-#                 slow_it_down, chunk)
-
-#         playlist_id_to_attributes[spotify_and_chill]["track_id_set"].update(
-#             move_to_spotify_and_chill_track_id_set)
-#         playlist_id_to_attributes[just_good_music]["track_id_set"] = playlist_id_to_attributes[just_good_music]["track_id_set"].difference(
-#             move_to_spotify_and_chill_track_id_set)
-#         playlist_id_to_attributes[slow_it_down]["track_id_set"] = playlist_id_to_attributes[slow_it_down]["track_id_set"].difference(
-#             move_to_spotify_and_chill_track_id_set)
-
-#     if move_to_slow_it_down_track_id_set:
-#         for chunk in divide_chunks_list(list(move_to_slow_it_down_track_id_set), 100):
-#             spotify.playlist_add_items(slow_it_down, chunk)
-#             spotify.playlist_remove_all_occurrences_of_items(
-#                 spotify_and_chill, chunk)
-#             spotify.playlist_remove_all_occurrences_of_items(
-#                 just_good_music, chunk)
-
-#         playlist_id_to_attributes[slow_it_down]["track_id_set"].update(
-#             move_to_slow_it_down_track_id_set)
-#         playlist_id_to_attributes[spotify_and_chill]["track_id_set"] = playlist_id_to_attributes[spotify_and_chill]["track_id_set"].difference(
-#             move_to_slow_it_down_track_id_set)
-#         playlist_id_to_attributes[just_good_music]["track_id_set"] = playlist_id_to_attributes[just_good_music]["track_id_set"].difference(
-#             move_to_slow_it_down_track_id_set)
-
-
-# def moveSongsUpToDanceTheNightAway(from_playlist_id, to_playlist_id):
-#     moved_track_id_set = set()
-#     for track_id in playlist_id_to_attributes[from_playlist_id]["track_id_set"]:
-#         if "features" in track_id_to_attributes[track_id]:
-#             if track_id_to_attributes[track_id]["features"]["danceability"] >= DANCEABILITY_QUALIFIER and track_id_to_attributes[track_id]["features"]["energy"] >= DANCE_ENERGY_QUALIFIER:
-#                 moved_track_id_set.add(track_id)
-#                 print("Moved: " + track_id_to_attributes[track_id]["name"] + " up for its danceability of " + str(
-#                     track_id_to_attributes[track_id]["features"]["danceability"]))
-#         else:
-#             print("No features for " +
-#                   track_id_to_attributes[track_id]["name"])
-
-#     if moved_track_id_set:
-#         for chunk in divide_chunks_list(list(moved_track_id_set), 100):
-#             spotify.playlist_add_items(to_playlist_id, list(chunk))
-#             spotify.playlist_remove_all_occurrences_of_items(
-#                 from_playlist_id, list(chunk))
-
-#         playlist_id_to_attributes[to_playlist_id]["track_id_set"].update(
-#             moved_track_id_set)
-#         playlist_id_to_attributes[from_playlist_id]["track_id_set"] = playlist_id_to_attributes[from_playlist_id]["track_id_set"].difference(
-#             moved_track_id_set)
-
-
-# def moveSongsDownToPoolside(from_playlist_id, to_playlist_id):
-#     moved_track_id_set = set()
-#     for track_id in playlist_id_to_attributes[from_playlist_id]["track_id_set"]:
-#         if "features" in track_id_to_attributes[track_id]:
-#             if track_id_to_attributes[track_id]["features"]["danceability"] < DANCEABILITY_QUALIFIER or track_id_to_attributes[track_id]["features"]["energy"] < DANCE_ENERGY_QUALIFIER:
-#                 moved_track_id_set.add(track_id)
-#                 print("Moved: " + track_id_to_attributes[track_id]["name"] + " down for its danceability of " + str(
-#                     track_id_to_attributes[track_id]["features"]["danceability"]))
-#         else:
-#             print("No features for " +
-#                   track_id_to_attributes[track_id]["name"])
-
-#     if moved_track_id_set:
-#         for chunk in divide_chunks_list(list(moved_track_id_set), 100):
-#             spotify.playlist_add_items(to_playlist_id, chunk)
-#             spotify.playlist_remove_all_occurrences_of_items(
-#                 from_playlist_id, chunk)
-
-#         playlist_id_to_attributes[to_playlist_id]["track_id_set"].update(
-#             moved_track_id_set)
-#         playlist_id_to_attributes[from_playlist_id]["track_id_set"] = playlist_id_to_attributes[from_playlist_id]["track_id_set"].difference(
-#             moved_track_id_set)
-
-
-# def moveSongs():
-#     for playlist_id, playlist_attributes in playlist_id_to_attributes.items():
-#         if playlist_attributes["name"] == "Just Good Music":
-#             just_good_music = playlist_id
-#         elif playlist_attributes["name"] == "Dance the Night Away":
-#             dance_the_night_away = playlist_id
-#         elif playlist_attributes["name"] == "Spotify and Chill":
-#             spotify_and_chill = playlist_id
-#         elif playlist_attributes["name"] == "Poolside":
-#             poolside = playlist_id
-#         elif playlist_attributes["name"] == "Slow it Down":
-#             slow_it_down = playlist_id
-
-#     process_energy(just_good_music, spotify_and_chill, slow_it_down)
-
-#     moveSongsUpToDanceTheNightAway(poolside, dance_the_night_away)
-#     moveSongsDownToPoolside(dance_the_night_away, poolside)
-
-
-
-
-# def clusterPlaylists():
-#     column_names = ["id", "danceability", "energy", "key", "loudness", "mode", "speechiness",
-#                     "acousticness", "instrumentalness", "liveness", "valence", "tempo", "time_signature"]
-#     all_songs = pd.DataFrame(columns=column_names)
-#     for playlist in own_playlists:
-#         if playlist["name"] != "Popular on Spotify":
-#             songs = [x for x in get_playlist_items(playlist["id"]) if "track" in x and isinstance(
-#                 x["track"], dict) and "id" in x["track"]]
-#             for song_group in divide_chunks_list(songs, 100):
-#                 songs_features = spotify.audio_features(
-#                     [x["track"]["id"] for x in song_group])
-#                 for song_features in songs_features:
-#                     new_song = pd.DataFrame([[song_features["id"], song_features["danceability"], song_features["energy"], song_features["key"], song_features["loudness"], song_features["mode"], song_features["speechiness"],
-#                                             song_features["acousticness"], song_features["instrumentalness"], song_features["liveness"], song_features["valence"], song_features["tempo"], song_features["time_signature"]]], columns=column_names)
-#                     all_songs = all_songs.append(new_song, ignore_index=True)
-
-#     # all_songs.plot()
-#     # plt.show()
-
-#     all_songs.set_index("id", inplace=True)
-
-#     scaler = StandardScaler()
-#     all_songs_scaled = scaler.fit_transform(all_songs)
-#     all_songs_normalized = normalize(all_songs_scaled)
-#     all_songs_normalized = pd.DataFrame(
-#         all_songs_normalized, index=all_songs.index)
-
-#     # print(all_songs_normalized.head())
-#     # all_songs_normalized.plot()
-#     # plt.show()
-
-#     # test = PCA().fit(all_songs_normalized)
-#     # plt.plot(np.cumsum(test.explained_variance_ratio_))
-#     # plt.xlabel("number of components")
-#     # plt.ylabel("cum exp variance")
-#     # plt.show()
-
-#     pca = PCA(n_components=0.95)
-#     all_songs_principal = pca.fit_transform(all_songs_normalized)
-#     all_songs_principal = pd.DataFrame(
-#         all_songs_principal, index=all_songs_normalized.index)
-#     all_songs_principal.columns = [
-#         "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10"]
-#     # all_songs_principal.plot()
-#     # plt.show()
-
-#     # Building the clustering model
-#     n_clusters = 20
-#     spectral_model_rbf = SpectralClustering(
-#         n_clusters=n_clusters, affinity="rbf")  # "nearest_neighbors"
-
-#     cluster_song_lists = {}
-#     for idx in range(0, n_clusters):
-#         cluster_song_lists[idx] = []
-
-    # # Training the model and Storing the predicted cluster labels
-    # labels_rbf = spectral_model_rbf.fit_predict(all_songs_principal)
-    # for idx, id in enumerate(all_songs_principal.index.values.tolist()):
-    #     cluster_song_lists[labels_rbf[idx]].append(id)
-
-    # # for idx in range (0, n_clusters):
-    # #     playlist_id = spotify.user_playlist_create(user_id, "Cluster " + str(idx+1))["id"]
-    # #     for chunk in divide_chunks_list(list(cluster_song_lists[idx]), 100):
-    # #         spotify.playlist_add_items(playlist_id, chunk)
-
-    # # cluster_column_names = ["playlist_name", "danceability", "energy", "key", "loudness", "mode", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "time_signature"]
-    # # cluster_features = pd.DataFrame(columns = column_names)
-    # # for playlist in own_playlists:
-    # #     if playlist["name"] != "Popular on Spotify":
-    # #         playlist_column_names = ["danceability", "energy", "key", "loudness", "mode", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "tempo", "time_signature"]
-    # #         playlist_songs = pd.DataFrame(columns = playlist_column_names)
-    # #         songs = [x for x in get_playlist_items(playlist["id"]) if "track" in x and isinstance(x["track"], dict) and "id" in x["track"]]
-    # #         for song_group in divide_chunks_list(songs, 100):
-    # #             songs_features = spotify.audio_features([x["track"]["id"] for x in song_group])
-    # #             for song_features in songs_features:
-    # #                 new_song = pd.DataFrame([[song_features["danceability"], song_features["energy"], song_features["key"], song_features["loudness"], song_features["mode"], song_features["speechiness"], song_features["acousticness"], song_features["instrumentalness"], song_features["liveness"], song_features["valence"], song_features["tempo"], song_features["time_signature"]]], columns=playlist_column_names)
-    # #                 playlist_songs = playlist_songs.append(new_song, ignore_index=True)
-    # #     danceability = playlist_songs["danceability"].mean()
-    # #     energy = playlist_songs["danceability"].mean()
-    # #     key = playlist_songs["danceability"].mean()
-    # #     loudness = playlist_songs["danceability"].mean()
-    # #     mode = playlist_songs["danceability"].mean()
-    # #     speechiness = playlist_songs["danceability"].mean()
-    # #     acousticness = playlist_songs["danceability"].mean()
-    # #     instrumentalness = playlist_songs["danceability"].mean()
-    # #     liveness = playlist_songs["danceability"].mean()
-    # #     valance = playlist_songs["danceability"].mean()
-    # #     tempo = playlist_songs["danceability"].mean()
-    # #     time_signature = playlist_songs["danceability"].mean()
-    # #     cluster_features = cluster_features.append(pd.DataFrame([[playlist["name"], danceability, energy, key, loudness, mode, speechiness, acousticness, instrumentalness, liveness, valance, tempo, time_signature]], columns=cluster_column_names), ignore_index=True)
-    # # cluster_features.set_index("playlist_name", inplace=True)
-
-
-
-
