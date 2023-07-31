@@ -325,7 +325,7 @@ def move_tracks():
                 spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Dance the Night Away"]
             else:
                 spotify_database.at[index, 'playlist_name'] = "Poolside"
-                spotHify_database.at[index, 'playlist_id'] = playlist_name_to_id["Poolside"]
+                spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Poolside"]
     
 def generate_playlist_predictions():
     global audio_features
