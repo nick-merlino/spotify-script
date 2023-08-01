@@ -326,6 +326,14 @@ def move_tracks():
             else:
                 spotify_database.at[index, 'playlist_name'] = "Poolside"
                 spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Poolside"]
+
+        if df['playlist_name'] in ["I'll Day Drink to That", "Kick'n Back"]:
+            if df['energy'] > 0.75:
+                spotify_database.at[index, 'playlist_name'] = "I'll Day Drink to That"
+                spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["I'll Day Drink to That"]
+            else:
+                spotify_database.at[index, 'playlist_name'] = "Kick'n Back"
+                spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Kick'n Back"]
     
 def generate_playlist_predictions():
     global audio_features
