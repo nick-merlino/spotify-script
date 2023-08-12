@@ -101,14 +101,14 @@ def divide_chunks_list(l, n):
 @retry(retry_on_exception=retry_on_rate_limit_error, wait_fixed=31000, stop_max_attempt_number=5)
 def get_highest_popularity_track(track_name, artists):
     try:
-        artist_names = " ".join(artists)
+        artist_names = " ".join(artists[:3])
 
         # Search for the track
         search_results = sp.search(q=f"track:{track_name} artist:{artist_names}", type="track", limit=10)
 
         # Sort the search results by popularity in descending order
-        if search_results:
-            search_results = sorted(search_results['tracks']['items'], key=lambda x: x['popularity'], reverse=True)
+        if search_results and "tracks" in search_results and "items" in search_results["tracks"]:
+            search_results = sorted(search_results['tracks']['items'], key=lambda x: x.get('popularity', 0), reverse=True)
 
         # Return the most popular version of the track
         return search_results[0] if search_results else None

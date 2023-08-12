@@ -366,6 +366,14 @@ def generate_playlist_predictions():
         predicted_playlist_name = group_df["predicted_playlist"].unique()[0]
         create_predicted_playlist(predicted_playlist_name, group_df.index, playlist_name_to_id["Popular on Spotify"])
 
+def restore_high_popularity_tracks():
+        for track_id, track_df in spotify_database[(spotify_database["last_deleted_date"].notnull()) & (spotify_database["popularity"] > 90)].iterrows():
+            spotify_database.at[track_id, "playlist_name"] = "Popular (Restored)"
+            spotify_database.at[track_id, "playlist_id"] = playlist_name_to_id["Popular (Restored)"]
+            spotify_database.at[track_id, "script_deleted"] = np.NaN
+            spotify_database.at[track_id, "user_deleted"] = np.NaN
+            spotify_database.at[track_id, "last_deleted_date"] = np.NaN
+
 if __name__ == "__main__":
     parser = ArgumentParser()
     group1 = parser.add_argument_group()
@@ -374,6 +382,7 @@ if __name__ == "__main__":
 
     group2 = parser.add_mutually_exclusive_group()
     group2.add_argument("-r", action="store_true", help="Restore deleted songs from today")
+    group2.add_argument("-a", action="store_true", help="Restore potentially accidentally deleted popular songs")
     group2.add_argument("-c", action="store_true", help="Print current spotify categories")
     group2.add_argument("-p", action="store_true", help="Plot attributes")
     group2.add_argument("-m", action="store_true", help="Predict playlists")
@@ -400,6 +409,12 @@ if __name__ == "__main__":
     playlists = get_user_playlists()    
     update_playlist_info(playlists)
     spotify_database.to_csv("spotify-database.csv")
+
+    if args.a:
+        restore_high_popularity_tracks()
+        spotify_database.to_csv("spotify-database.csv")
+        upload_playlists()
+        exit()
     
     if args.m:
         generate_playlist_predictions()
