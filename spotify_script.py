@@ -235,6 +235,12 @@ def delete_duds():
         if track_df["popularity"] < min_popularity:
             spotify_database.at[track_id, "script_deleted"] = True
             spotify_database.at[track_id, "last_deleted_date"] = datetime.now().strftime("%m/%d/%Y %H:%M:%S")
+    
+    for track_id, track_df in spotify_database[spotify_database["script_deleted"]].iterrows():
+        min_popularity = playlist_name_to_min_popularity[track_df["playlist_name"]]
+        if track_df["popularity"] >= min_popularity:
+            spotify_database.at[track_id, "script_deleted"] = False
+            spotify_database.at[track_id, "last_deleted_date"] = None
 
 def update_track_audio_features():
     no_attribute_ids = spotify_database[(spotify_database["last_deleted_date"].isna()) & (spotify_database["energy"].isnull())].index.tolist()
@@ -434,8 +440,8 @@ if __name__ == "__main__":
     update_artist_cache()
 
     if args.d:
-        get_popular_track_verions()
-        spotify_database.to_csv("spotify-database.csv")
+        # get_popular_track_verions()
+        # spotify_database.to_csv("spotify-database.csv")
         delete_duds()
 
     update_track_audio_features()

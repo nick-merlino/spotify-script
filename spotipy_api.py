@@ -103,6 +103,8 @@ def get_highest_popularity_track(track_name, artists):
     try:
         artist_names = " ".join(artists[:3])
 
+        print(track_name)
+        print(artist_names)
         # Search for the track
         search_results = sp.search(q=f"track:{track_name} artist:{artist_names}", type="track", limit=10)
 
