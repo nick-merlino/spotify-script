@@ -236,7 +236,7 @@ def delete_duds():
             spotify_database.at[track_id, "script_deleted"] = True
             spotify_database.at[track_id, "last_deleted_date"] = datetime.now().strftime("%m/%d/%Y %H:%M:%S")
     
-    for track_id, track_df in spotify_database[spotify_database["script_deleted"]].iterrows():
+    for track_id, track_df in spotify_database[spotify_database["script_deleted"] == True].iterrows():
         min_popularity = playlist_name_to_min_popularity[track_df["playlist_name"]]
         if track_df["popularity"] >= min_popularity:
             spotify_database.at[track_id, "script_deleted"] = False
@@ -370,7 +370,8 @@ def generate_playlist_predictions():
     
     for _, group_df in tqdm(test_df.groupby("predicted_playlist"), desc="Uploading predicted playlists"):
         predicted_playlist_name = group_df["predicted_playlist"].unique()[0]
-        create_predicted_playlist(predicted_playlist_name, group_df.index, playlist_name_to_id["Popular on Spotify"])
+        track_id_list = group_df.sort_values(by=["popularity"], ascending=False).index # This may not work (untested)
+        create_predicted_playlist(predicted_playlist_name, track_id_list, playlist_name_to_id["Popular on Spotify"])
 
 def restore_high_popularity_tracks():
         for track_id, track_df in spotify_database[(spotify_database["last_deleted_date"].notnull()) & (spotify_database["popularity"] > 90)].iterrows():
@@ -440,8 +441,8 @@ if __name__ == "__main__":
     update_artist_cache()
 
     if args.d:
-        # get_popular_track_verions()
-        # spotify_database.to_csv("spotify-database.csv")
+        get_popular_track_verions()
+        spotify_database.to_csv("spotify-database.csv")
         delete_duds()
 
     update_track_audio_features()
