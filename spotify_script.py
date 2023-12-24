@@ -315,10 +315,10 @@ def restore_deleted_songs():
 def move_tracks():
     for index, df in spotify_database.iterrows():        
         if df['playlist_name'] in ["Slow it Down", "Spotify and Chill", "Just Good Music"]:
-            if df['energy'] > 0.7:
+            if df['energy'] > 0.75:
                 spotify_database.at[index, 'playlist_name'] = "Just Good Music"
                 spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Just Good Music"]
-            elif df['energy'] > 0.4:
+            elif df['energy'] > 0.45:
                 spotify_database.at[index, 'playlist_name'] = "Spotify and Chill"
                 spotify_database.at[index, 'playlist_id'] = playlist_name_to_id["Spotify and Chill"]
             else:
