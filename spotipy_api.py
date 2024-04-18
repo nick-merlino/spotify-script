@@ -61,7 +61,7 @@ def get_featured_playlist_ids():
 def get_category_playlist_ids(category_id):
     try:
         # Get top 50 playlists per category. Could be increased but API would be hit more
-        playlists_container = sp.category_playlists(category_id, limit=50)
+        playlists_container = sp.category_playlists(category_id, limit=20)
         playlists = playlists_container.get("playlists", {})
         return [x['id'] for x in playlists.get("items", []) if x is not None]
     except SpotifyException as e:
