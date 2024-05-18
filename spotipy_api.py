@@ -78,7 +78,7 @@ def get_playlist_tracks(playlist_id):
         return tracks
     except SpotifyException as e:
         logging.error(f"Can't get playlists tracks - {e}")
-        exit()
+        return []
     
 @retry(retry_on_exception=retry_on_rate_limit_error, wait_fixed=31000, stop_max_attempt_number=5)
 def get_artists(new_artist_ids):

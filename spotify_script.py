@@ -1,6 +1,6 @@
 from argparse import ArgumentParser
 import logging
-from pandas import DataFrame, read_csv, concat
+from pandas import DataFrame, read_csv, concat, Series
 from pathlib import Path
 from pickle import dump, load
 import numpy as np
