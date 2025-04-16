@@ -3,6 +3,7 @@ diskcache
 joblib
 matplotlib
 pandas
+plotly
 python-dotenv
 scikit-learn
 spotipy
