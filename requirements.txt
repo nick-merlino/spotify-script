@@ -1,0 +1,13 @@
+aiosqlite
+diskcache
+joblib
+matplotlib
+pandas
+python-dotenv
+scikit-learn
+spotipy
+streamlit
+sqlalchemy
+tenacity
+tqdm
+seaborn

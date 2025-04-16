@@ -3,3 +3,7 @@ __pycache__/
 config.py
 .artists_cache.pkl
 .spotipy_auth.cache
+.env
+.cache-spotify
+spotify.db
+spotify_cache/
