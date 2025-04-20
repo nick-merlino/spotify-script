@@ -52,7 +52,9 @@ class BusinessLogic:
         try:
             return playlist_priority_list.index(playlist_name)
         except ValueError:
-            return len(playlist_priority_list)
+            # unknown playlist ⇒ highest priority
+            return 7
+
 
     async def get_selected_category_ids(self) -> List[str]:
         """
@@ -254,60 +256,210 @@ class BusinessLogic:
         except Exception as e:
             logger.error(f"Error updating audio features for {track_id}: {e}")
 
+    async def refresh_popularity_local(self) -> None:
+        """
+        Refresh local `popularity` for all tracks that are still active
+        (script_deleted IS NULL AND user_deleted IS NULL) by batching Spotify API calls.
+        """
+        import sqlite3
+        import asyncio
+        from tqdm import tqdm
+
+        # collect active track IDs
+        conn = sqlite3.connect("spotify.db")
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT track_id FROM tracks "
+            "WHERE script_deleted IS NULL AND user_deleted IS NULL"
+        )
+        ids = [row[0] for row in cur.fetchall()]
+        conn.close()
+
+        # batch refresh popularity in chunks of 50
+        for i in tqdm(range(0, len(ids), 50),
+                      desc="Refreshing popularity",
+                      unit="batch",
+                      dynamic_ncols=True):
+            batch = ids[i: i + 50]
+            results = await asyncio.to_thread(
+                lambda: self.spotify._safe_api_call(self.spotify.sp.tracks, batch)
+            )
+
+            # update each track's popularity in the DB
+            conn = sqlite3.connect("spotify.db")
+            cur = conn.cursor()
+            for tr in tqdm(results.get("tracks", []),
+                           desc="Updating batch popularity",
+                           unit="track",
+                           leave=False,
+                           dynamic_ncols=True):
+                cur.execute(
+                    "UPDATE tracks SET popularity = ? WHERE track_id = ?",
+                    (tr.get("popularity", 0), tr["id"])
+                )
+            conn.commit()
+            conn.close()
+
+
+    async def dedupe_exact_local(self) -> None:
+        """
+        Deduplicate by exact (track_name, artists) for all active tracks
+        (script_deleted IS NULL AND user_deleted IS NULL). Keep only the one with
+        highest local popularity, marking others as user_deleted.
+        """
+        import sqlite3
+        from datetime import datetime
+        from collections import defaultdict
+        from tqdm import tqdm
+
+        # load active tracks
+        conn = sqlite3.connect("spotify.db")
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT track_id, track_name, artists, popularity FROM tracks "
+            "WHERE script_deleted IS NULL AND user_deleted IS NULL"
+        )
+        rows = cur.fetchall()
+        conn.close()
+
+        # group by exact metadata
+        buckets = defaultdict(list)
+        for track_id, name, artists, pop in tqdm(rows,
+                                                desc="Grouping tracks",
+                                                unit="row",
+                                                dynamic_ncols=True):
+            buckets[(name, artists)].append((track_id, pop))
+
+        timestamp = datetime.now().strftime("%m/%d/%Y %H:%M:%S")
+        # dedupe each cluster
+        for (name, artists), items in tqdm(buckets.items(),
+                                           desc="Deduplicating clusters",
+                                           unit="cluster",
+                                           dynamic_ncols=True):
+            if len(items) <= 1:
+                continue
+            # choose the track with highest popularity
+            best_id, _ = max(items, key=lambda x: x[1])
+            # mark all other duplicates as user_deleted
+            conn = sqlite3.connect("spotify.db")
+            cur = conn.cursor()
+            for tid, _ in items:
+                if tid != best_id:
+                    cur.execute(
+                        "UPDATE tracks SET user_deleted = 1, last_deleted_date = ? "
+                        "WHERE track_id = ? "
+                        "AND script_deleted IS NULL AND user_deleted IS NULL",
+                        (timestamp, tid)
+                    )
+            conn.commit()
+            conn.close()
+
+
     async def ensure_best_versions(self) -> None:
+        """
+        Deduplicate: for each active track (script_deleted & user_deleted are null),
+        find the most popular Spotify variant, upsert it, and mark all other copies as user_deleted.
+        """
         try:
-            # Note: Only processing tracks that are not marked as script_deleted.
-            tracks_df = pd.read_sql_query("SELECT * FROM tracks WHERE script_deleted IS NULL", "sqlite:///spotify.db")
-            for _, row in tqdm(tracks_df.iterrows(), total=len(tracks_df), desc="Ensuring best versions"):
-                track_id = row["track_id"]
+            import sqlite3
+            import datetime
+            import pandas as pd
+            from collections import defaultdict
+            from tqdm import tqdm
+            # Load only active tracks
+            conn = sqlite3.connect("spotify.db")
+            df = pd.read_sql_query(
+                "SELECT * FROM tracks WHERE script_deleted IS NULL AND user_deleted IS NULL",
+                conn
+            )
+            conn.close()
+
+            # Pre-fetch artist cache
+            artist_cache = await get_all_artists()
+            best_map: Dict[str, str] = {}
+
+            # Determine best variant for each track
+            for _, row in tqdm(df.iterrows(), total=len(df), desc="Finding best variants"):
+                orig_id = row["track_id"]
                 artists = row["artists"].split(",") if row["artists"] else []
-                artist_cache = await get_all_artists()
                 artist_names = [artist_cache.get(a, "") for a in artists]
-                # Limit the track name to 25 characters as per Spotify's limit.
-                track_query = row["track_name"][:25]
-                best_track = await self.spotify.search_track(track_query, artist_names)
-                if best_track and best_track["id"] != track_id and best_track["popularity"] > row["popularity"]:
-                    best_track_data = {
-                        "track_id": best_track["id"],
-                        "playlist_id": row["playlist_id"],
-                        "playlist_name": row["playlist_name"],
-                        "track_name": best_track["name"],
-                        "duration_ms": best_track["duration_ms"],
-                        "popularity": best_track["popularity"],
-                        "artists": ",".join([artist["id"] for artist in best_track["artists"]]),
-                        "release_year": int(best_track["album"]["release_date"].split("-")[0]) if best_track["album"]["release_date"] else None,
-                        "explicit": 1 if best_track["explicit"] else 0,
-                        "danceability": None,
-                        "energy": None,
-                        "key": None,
-                        "speechiness": None,
-                        "loudness": None,
-                        "mode": None,
-                        "acousticness": None,
-                        "instrumentalness": None,
-                        "liveness": None,
-                        "valence": None,
-                        "tempo": None,
-                        "time_signature": None,
-                        "user_deleted": None,
-                        "script_deleted": None,
-                        "last_deleted_date": None
-                    }
-                    await insert_or_update_track(best_track_data)
-                    now = datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")
-                    self._mark_track_deleted(track_id, now)
-            logger.info("Best versions ensured")
+                track_query = row["track_name"]
+                best = await self.spotify.search_track(track_query, artist_names)
+                if best:
+                    best_map[orig_id] = best["id"]
+                    if best["id"] != orig_id and best["popularity"] > row["popularity"]:
+                        # Upsert the more popular variant
+                        best_data = {
+                            "track_id": best["id"],
+                            "playlist_id": row["playlist_id"],
+                            "playlist_name": row["playlist_name"],
+                            "track_name": best["name"],
+                            "duration_ms": best["duration_ms"],
+                            "popularity": best["popularity"],
+                            "artists": ",".join([artist["id"] for artist in best["artists"]]),
+                            "release_year": int(best["album"]["release_date"].split("-")[0]) if best["album"].get("release_date") else None,
+                            "explicit": 1 if best["explicit"] else 0,
+                            # preserve audio_features columns
+                            **{feat: None for feat in audio_features if feat not in [
+                                "track_id","playlist_id","playlist_name","track_name",
+                                "duration_ms","popularity","artists","release_year","explicit"
+                            ]}
+                        }
+                        await insert_or_update_track(best_data)
+                else:
+                    best_map[orig_id] = orig_id
+
+            # Group originals by their best variant
+            groups: Dict[str, List[str]] = defaultdict(list)
+            for orig, best_id in best_map.items():
+                groups[best_id].append(orig)
+
+            # Mark non-best copies as user_deleted if still active
+            timestamp = datetime.datetime.now().strftime("%m/%d/%Y %H:%M:%S")
+            for best_id, orig_list in groups.items():
+                for orig_id in orig_list:
+                    if orig_id != best_id:
+                        conn = sqlite3.connect("spotify.db")
+                        conn.execute(
+                            """
+                            UPDATE tracks
+                               SET user_deleted     = 1,
+                                   last_deleted_date = ?
+                             WHERE track_id       = ?
+                               AND script_deleted IS NULL
+                               AND user_deleted IS NULL
+                            """,
+                            (timestamp, orig_id)
+                        )
+                        conn.commit()
+                        conn.close()
+
+            logger.info("Best variants ensured and duplicates user_deleted.")
         except Exception as e:
             logger.error(f"Error in ensure_best_versions: {e}")
 
     def _mark_track_deleted(self, track_id: str, timestamp: str) -> None:
+        """
+        Marks a track as script_deleted=1 (and updates last_deleted_date)
+        only if it has not already been marked as user_deleted.
+        """
         try:
             conn = sqlite3.connect("spotify.db")
-            conn.execute("UPDATE tracks SET script_deleted=1, last_deleted_date=? WHERE track_id=?", (timestamp, track_id))
+            conn.execute(
+                """
+                UPDATE tracks
+                SET script_deleted   = 1,
+                    last_deleted_date = ?
+                WHERE track_id       = ?
+                AND user_deleted IS NULL
+                """,
+                (timestamp, track_id)
+            )
             conn.commit()
             conn.close()
         except Exception as e:
             logger.error(f"Error marking track {track_id} as deleted: {e}")
+
 
     def delete_duds(self) -> None:
         """
@@ -401,22 +553,47 @@ class BusinessLogic:
             logger.error(f"Error restoring high popularity tracks: {e}")
 
     async def upload_playlists(self) -> None:
+        """
+        Uploads each playlist with only active tracks:
+        - script_deleted IS NULL
+        - user_deleted   IS NULL
+        Deduplicates by (track_name, artists), keeping the highest-popularity version.
+        """
         try:
             conn = sqlite3.connect("spotify.db")
-            df = pd.read_sql_query("SELECT * FROM tracks WHERE script_deleted IS NULL", conn)
+            # only select tracks that haven't been script- or user-deleted
+            df = pd.read_sql_query(
+                "SELECT * FROM tracks "
+                "WHERE script_deleted IS NULL AND user_deleted IS NULL",
+                conn
+            )
             conn.close()
+
             grouped = df.groupby("playlist_name")
             tasks = []
-            for playlist_name, group in tqdm(list(grouped), desc="Uploading playlists"):
+            for playlist_name, group in tqdm(
+                list(grouped),
+                desc="Uploading playlists",
+                dynamic_ncols=True,
+                leave=False
+            ):
+                # sort so the most popular version is first
                 sorted_group = group.sort_values(by="popularity", ascending=False)
-                track_ids = sorted_group["track_id"].tolist()
-                playlist_id = sorted_group["playlist_id"].iloc[0]
+                # drop any exact duplicates (name+artists), keep the top one
+                unique_group = sorted_group.drop_duplicates(
+                    subset=["track_name", "artists"],
+                    keep="first"
+                )
+                track_ids = unique_group["track_id"].tolist()
+                playlist_id = unique_group["playlist_id"].iloc[0]
                 tasks.append(self.spotify.upload_playlist(playlist_id, track_ids))
+
             if tasks:
                 await asyncio.gather(*tasks)
             logger.info("Playlists uploaded")
         except Exception as e:
             logger.error(f"Error uploading playlists: {e}")
+
 
     def generate_playlist_predictions(self) -> None:
         try:
@@ -527,12 +704,59 @@ class BusinessLogic:
         except Exception as e:
             logger.error(f"Error plotting playlists: {e}")
 
+    async def mark_user_deleted(self) -> None:
+        """
+        Marks tracks as user_deleted = 1 if they were in your DB (hence in a playlist before),
+        but now appear in no playlists, and have not already been script-deleted.
+        Shows a tqdm progress bar for the updates.
+        """
+        # 1) Gather every track ID currently in any of your playlists
+        playlists = await self.spotify.get_user_playlists()
+        current_ids = set()
+        for pl in playlists:
+            tracks = await self.spotify.get_playlist_tracks(pl["id"])
+            current_ids.update(t["id"] for t in tracks)
+
+        # 2) Load every track ID from your database
+        all_tracks = await get_all_tracks()  # returns list of rows, row[0] is track_id
+        db_ids = {row[0] for row in all_tracks}
+
+        # 3) Compute which IDs have disappeared
+        gone_ids = list(db_ids - current_ids)
+        if not gone_ids:
+            return  # nothing to mark
+
+        # 4) Only mark those that aren't script-deleted, with a tqdm bar
+        timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        async with pool.get_connection() as conn:
+            for tid in tqdm(
+                gone_ids,
+                desc="Marking user_deleted tracks",
+                unit="track",
+                dynamic_ncols=True,
+                leave=False
+            ):
+                await conn.execute(
+                    """
+                    UPDATE tracks
+                       SET user_deleted     = 1,
+                           last_deleted_date = ?
+                     WHERE track_id         = ?
+                       AND script_deleted IS NULL
+                    """,
+                    (timestamp, tid)
+                )
+            await conn.commit()
+
+
     async def run_full_pipeline(self) -> None:
         await self.update_playlist_info()
+        await self.mark_user_deleted()
         # await self.find_new_music()
         await self.update_artist_cache()
         # await self.update_audio_features()
-        await self.ensure_best_versions()
+        await self.refresh_popularity_local()
+        await self.dedupe_exact_local()
         self.delete_duds()
         self.move_tracks()
         # self.restore_deleted_songs()

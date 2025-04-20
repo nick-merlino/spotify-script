@@ -34,7 +34,7 @@ def main() -> None:
     parser.add_argument("-b", action="store_true", help="Ensure best versions of tracks are used")
     parser.add_argument("-d", action="store_true", help="Delete duds (low popularity tracks)")
     parser.add_argument("-t", action="store_true", help="Move tracks between playlists based on energy")
-    parser.add_argument("-r", action="store_true", help="Restore recently deleted songs")
+    # parser.add_argument("-r", action="store_true", help="Restore recently deleted songs")
     # parser.add_argument("-m", action="store_true", help="Generate playlist predictions using ML")
     parser.add_argument("-p", action="store_true", help="Upload playlists to Spotify (sorted by popularity)")
     # parser.add_argument("-plt", action="store_true", help="Plot enhanced playlist visualizations")
@@ -58,6 +58,8 @@ def main() -> None:
     tasks = []
     if args.n:
         tasks.append(logic.update_playlist_info())
+        tasks.append(logic.mark_user_deleted())
+
     # if args.f:
     #     tasks.append(logic.find_new_music())
     if args.a:
@@ -67,13 +69,14 @@ def main() -> None:
     if tasks:
         loop.run_until_complete(asyncio.gather(*tasks))
     if args.b:
-        loop.run_until_complete(logic.ensure_best_versions())
+        loop.run_until_complete(logic.refresh_popularity_local())
+        loop.run_until_complete(logic.dedupe_exact_local())
     if args.d:
         logic.delete_duds()
     if args.t:
         logic.move_tracks()
-    if args.r:
-        logic.restore_deleted_songs()
+    # if args.r:
+    #     logic.restore_deleted_songs()
     # if args.m:
     #     logic.generate_playlist_predictions()
     if args.p:
